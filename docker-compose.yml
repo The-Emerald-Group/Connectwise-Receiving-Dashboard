@@ -1,0 +1,18 @@
+services:
+  connectwise-receiving:
+    image: samuelstreets/Connectwise-Receiving-Dashboard
+    container_name: connectwise-receiving
+    ports:
+      - "8089:5000"
+    environment:
+      # ── ConnectWise API credentials ────────────────────────────────────────
+      - CW_SITE=api-eu.myconnectwise.net
+      - CW_COMPANY=yourcompanyid
+      - CW_PUBLIC_KEY=your_public_key_here
+      - CW_PRIVATE_KEY=your_private_key_here
+      - CW_CLIENT_ID=your_client_id_here
+      
+      # ── SSL verification ───────────────────────────────────────────────────
+      - CW_VERIFY_SSL=true
+
+    restart: unless-stopped
