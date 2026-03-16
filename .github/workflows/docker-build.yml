@@ -1,0 +1,326 @@
+name: Build & Push to Docker Hub
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      push_to_hub:
+        description: 'Push to Docker Hub'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: samuelstreets/Connectwise-Receiving-Dashboard
+  DOCKER_BUILDKIT: 1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: latest
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.run_number }}-${{ github.run_attempt }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' && (github.event.inputs.push_to_hub != 'false') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Image digest
+        run: echo "Pushed image digest: ${{ steps.build.outputs.digest }}"
+
+      - name: Docker image metadata
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "## Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image**: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags**: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest**: ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+
+  cleanup-old-images:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Delete untagged images (older than 7 days)
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          IMAGE_NAME: samuelstreets/Connectwise-Receiving-Dashboard
+        run: |
+          set +e  # Don't fail on errors
+          
+          echo "🧹 Cleaning up old Docker Hub images..."
+          
+          # Authenticate with Docker Hub API
+          TOKEN=$(curl -s -H "Content-Type: application/json" \
+            -d '{"username": "'$DOCKER_USERNAME'", "password": "'$DOCKER_PASSWORD'"}' \
+            https://hub.docker.com/v2/users/login | grep -o '"token":"[^"]*' | cut -d'"' -f4)
+          
+          if [ -z "$TOKEN" ]; then
+            echo "❌ Failed to authenticate with Docker Hub API"
+            exit 1
+          fi
+          
+          echo "✅ Authenticated with Docker Hub API"
+          
+          # Fetch all tags, sorted by last update (most recent first)
+          TAGS=$(curl -s -H "Authorization: JWT $TOKEN" \
+            "https://hub.docker.com/v2/repositories/$IMAGE_NAME/tags/?page_size=100&ordering=-last_updated" \
+            | grep -o '"name":"[^"]*' | cut -d'"' -f4)
+          
+          DELETED_COUNT=0
+          CURRENT_DATE=$(date +%s)
+          SEVEN_DAYS_AGO=$((CURRENT_DATE - 7*24*60*60))
+          
+          # Keep these tags always (never delete)
+          PROTECTED_TAGS=("latest" "main" "master")
+          
+          echo "📋 Processing tags (keeping: ${PROTECTED_TAGS[@]})"
+          
+          for TAG in $TAGS; do
+            # Skip protected tags
+            if [[ " ${PROTECTED_TAGS[@]} " =~ " ${TAG} " ]]; then
+              echo "✅ Keeping protected tag: $TAG"
+              continue
+            fi
+            
+            # Fetch tag details
+            TAG_INFO=$(curl -s -H "Authorization: JWT $TOKEN" \
+              "https://hub.docker.com/v2/repositories/$IMAGE_NAME/tags/$TAG/")
+            
+            LAST_UPDATED=$(echo "$TAG_INFO" | grep -o '"last_updated":"[^"]*' | cut -d'"' -f4)
+            
+            if [ -z "$LAST_UPDATED" ]; then
+              echo "⚠️  Could not fetch info for tag: $TAG"
+              continue
+            fi
+            
+            # Convert last_updated to timestamp
+            TAG_TIMESTAMP=$(date -d "$LAST_UPDATED" +%s 2>/dev/null || echo "0")
+            
+            # Delete if older than 7 days
+            if [ "$TAG_TIMESTAMP" -lt "$SEVEN_DAYS_AGO" ]; then
+              DELETE_RESPONSE=$(curl -s -X DELETE \
+                -H "Authorization: JWT $TOKEN" \
+                "https://hub.docker.com/v2/repositories/$IMAGE_NAME/tags/$TAG/")
+              
+              if [ $? -eq 0 ]; then
+                echo "🗑️  Deleted old tag: $TAG (updated: $LAST_UPDATED)"
+                ((DELETED_COUNT++))
+              else
+                echo "❌ Failed to delete tag: $TAG"
+              fi
+            else
+              DAYS_OLD=$(( (CURRENT_DATE - TAG_TIMESTAMP) / 86400 ))
+              echo "⏳ Keeping recent tag: $TAG ($DAYS_OLD days old)"
+            fi
+          done
+          
+          echo ""
+          echo "📊 Cleanup Summary:"
+          echo "   Deleted: $DELETED_COUNT old tags"
+          echo "   Kept: Latest, main, master, and recent tags"
+
+      - name: Cleanup summary
+        if: always()
+        run: |
+          echo "## Docker Hub Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Removed tags older than 7 days" >> $GITHUB_STEP_SUMMARY
+          echo "- Protected tags: \`latest\`, \`main\`, \`master\`" >> $GITHUB_STEP_SUMMARY
+          echo "- See step logs for details" >> $GITHUB_STEP_SUMMARY
+
+  test-image:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: connectwise-receiving:test
+
+      - name: Test image runs
+        run: |
+          docker run --rm \
+            -e CW_COMPANY=test \
+            -e CW_PUBLIC_KEY=test \
+            -e CW_PRIVATE_KEY=test \
+            -e CW_CLIENT_ID=test \
+            --entrypoint python \
+            connectwise-receiving:test \
+            -c "import flask, requests, gunicorn; print('✅ All dependencies loaded successfully')"
+
+      - name: Test image health check
+        timeout-minutes: 1
+        run: |
+          docker run -d \
+            --name test-container \
+            -e CW_COMPANY=test \
+            -e CW_PUBLIC_KEY=test \
+            -e CW_PRIVATE_KEY=test \
+            -e CW_CLIENT_ID=test \
+            -p 5000:5000 \
+            connectwise-receiving:test
+          
+          # Wait for container to start
+          sleep 3
+          
+          # Check if server is running
+          if curl -f http://localhost:5000/ > /dev/null 2>&1; then
+            echo "✅ Container started successfully and responds to requests"
+          else
+            echo "❌ Container failed to respond"
+            docker logs test-container
+            exit 1
+          fi
+          
+          docker stop test-container
+
+  create-release:
+    needs: [build, cleanup-old-images]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get tag name
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          {
+            echo "changelog<<EOF"
+            git log --oneline --decorate -n 10
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Docker Image
+            ```
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}
+            ```
+            
+            ## Changes
+            ${{ steps.changelog.outputs.changelog }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify:
+    needs: [build, cleanup-old-images]
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'push'
+    
+    steps:
+      - name: Build notification message
+        id: notification
+        run: |
+          if [ "${{ needs.build.result }}" == "success" ]; then
+            STATUS="✅ Success"
+          else
+            STATUS="❌ Failed"
+          fi
+          
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+          echo "commit=${GITHUB_SHA:0:7}" >> $GITHUB_OUTPUT
+
+      - name: Notification summary
+        run: |
+          echo "## Build Pipeline Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ steps.notification.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ steps.notification.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ steps.notification.outputs.commit }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
