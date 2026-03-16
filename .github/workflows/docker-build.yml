@@ -26,7 +26,6 @@ on:
 env:
   REGISTRY: docker.io
   IMAGE_NAME: samuelstreets/Connectwise-Receiving-Dashboard
-  DOCKER_BUILDKIT: 1
 
 jobs:
   build:
@@ -81,11 +80,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
 
       - name: Image digest
-        run: echo "Pushed image digest: ${{ steps.build.outputs.digest }}"
+        run: echo "Pushed image digest:${{ steps.build.outputs.digest }}"
 
       - name: Docker image metadata
         if: github.event_name != 'pull_request'
