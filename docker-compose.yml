@@ -1,6 +1,6 @@
 services:
   connectwise-receiving:
-    image: samuelstreets/Connectwise-Receiving-Dashboard
+    image: samuelstreets/connectwise-receiving-dashboard
     container_name: connectwise-receiving
     ports:
       - "8089:5000"
