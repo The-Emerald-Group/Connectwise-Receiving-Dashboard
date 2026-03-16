@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Product Receiving Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M21 16V8C21 6.89543 20.1046 6 19 6H5C3.89543 6 3 6.89543 3 8V16C3 17.1046 3.89543 18 5 18H19C20.1046 18 21 17.1046 21 16Z' stroke='%230a84ff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M12 2V12M12 12L15 9M12 12L9 9' stroke='%234cd964' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7 14H17' stroke='%23333' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root { --bg: #0a0a0a; --panel: #161616; --border: #222222; --accent: #0a84ff; --good: #4cd964; --text: #ffffff; --text-dim: #888888; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; padding: 20px; }
+  
+  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; }
+  
+  .logo-container { display: flex; align-items: center; gap: 12px; }
+  .title { font-size: 1.2rem; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; margin: 0; }
+  .title span { color: var(--accent); }
+  
+  .controls { display: flex; gap: 15px; align-items: center; }
+  .search-input { background: #111; border: 1px solid #333; color: white; padding: 8px 14px; border-radius: 6px; width: 250px; font-family: inherit; }
+  .search-input::placeholder { color: var(--text-dim); }
+  .btn-refresh { background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: 0.2s; font-weight: 600; }
+  .btn-refresh:hover { background: #333; }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th { text-align: left; padding: 14px 16px; background: #111; color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); }
+  td { padding: 16px; border-bottom: 1px solid var(--border); font-size: 0.9rem; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: #1c1c1c; }
+
+  .customer-badge { display: inline-block; background: rgba(10, 132, 255, 0.15); color: var(--accent); padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.8rem; margin-bottom: 6px;}
+  .po-info { font-size: 0.75rem; color: var(--text-dim); font-family: monospace; }
+  
+  .action-group { display: flex; align-items: center; gap: 12px; }
+  .input-stack { display: flex; flex-direction: column; gap: 6px; }
+  .qty-input { width: 100%; background: #000; border: 1px solid #333; color: white; padding: 8px; border-radius: 4px; text-align: center; font-weight: bold; }
+  .serial-input { width: 140px; background: #111; border: 1px dashed #444; color: white; padding: 6px 8px; border-radius: 4px; font-size: 0.75rem; transition: 0.2s; }
+  .serial-input:focus { border-color: var(--accent); outline: none; background: #000; }
+  .serial-input::placeholder { color: #555; font-style: italic; }
+  
+  .btn-receive { background: var(--good); color: #000; border: none; padding: 12px 18px; border-radius: 4px; font-weight: bold; cursor: pointer; transition: 0.2s; height: 100%; }
+  .btn-receive:hover { opacity: 0.8; }
+  .btn-receive:disabled { background: #333; color: #666; cursor: not-allowed; }
+
+  #loader { padding: 50px; text-align: center; color: var(--text-dim); font-size: 0.9rem; letter-spacing: 1px; text-transform: uppercase; font-weight: bold; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--good); color: black; padding: 12px 24px; border-radius: 6px; font-weight: bold; display: none; opacity: 0; transition: opacity 0.3s; box-shadow: 0 4px 12px rgba(0,0,0,0.5); z-index: 100; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo-container">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M21 16V8C21 6.89543 20.1046 6 19 6H5C3.89543 6 3 6.89543 3 8V16C3 17.1046 3.89543 18 5 18H19C20.1046 18 21 17.1046 21 16Z" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M12 2V12M12 12L15 9M12 12L9 9" stroke="#4cd964" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M7 14H17" stroke="#333" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <div class="title">ConnectWise <span>Receiving</span></div>
+  </div>
+  
+  <div class="controls">
+    <input type="text" id="searchInput" class="search-input" placeholder="Search PO, Customer, or Product..." onkeyup="filterTable()">
+    <button class="btn-refresh" onclick="fetchPending()">🔄 Refresh Queue</button>
+  </div>
+</div>
+
+<div id="loader">Loading pending items from ConnectWise...</div>
+
+<table id="items-table" style="display: none;">
+  <thead>
+    <tr>
+      <th>Customer & Order Info</th>
+      <th>Product Description</th>
+      <th>Vendor</th>
+      <th>Awaiting</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody id="table-body"></tbody>
+</table>
+
+<div id="toast" class="toast">Item Received!</div>
+
+<script>
+async function fetchPending() {
+    document.getElementById('loader').style.display = 'block';
+    document.getElementById('items-table').style.display = 'none';
+    
+    try {
+        const res = await fetch('/api/pending-receipts');
+        const data = await res.json();
+        
+        if (data.error) throw new Error(data.error);
+        
+        const tbody = document.getElementById('table-body');
+        tbody.innerHTML = '';
+        
+        if (data.items.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#888; padding: 40px;">No pending items to receive!</td></tr>';
+        } else {
+            data.items.forEach(item => {
+                const tr = document.createElement('tr');
+                tr.className = 'item-row'; 
+                tr.setAttribute('data-search', `${item.company} ${item.poNumber} ${item.description} ${item.vendor}`.toLowerCase());
+                
+                tr.innerHTML = `
+                    <td>
+                        <div class="customer-badge">${item.company}</div>
+                        <div class="po-info">PO: ${item.poNumber} | SO: ${item.soId || 'N/A'}</div>
+                    </td>
+                    <td style="font-weight: 500;">${item.description}</td>
+                    <td style="color: #aaa; font-size: 0.85rem;">${item.vendor}</td>
+                    <td>
+                        <strong style="font-size: 1.1rem; color: #ffcc00;">${item.pending}</strong> <span style="font-size:0.75rem; color:#666;">(of ${item.quantity})</span>
+                    </td>
+                    <td>
+                        <div class="action-group">
+                            <div class="input-stack">
+                                <input type="number" id="qty-${item.lineItemId}" class="qty-input" value="${item.pending}" min="1" max="${item.pending}" title="Quantity to Receive">
+                                <input type="text" id="serial-${item.lineItemId}" class="serial-input" placeholder="Serial(s) - Optional" title="Comma-separated serial numbers">
+                            </div>
+                            <button class="btn-receive" id="btn-${item.lineItemId}" onclick="receiveItem(${item.poId}, ${item.lineItemId}, ${item.received}, ${item.pending})">Receive</button>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+        
+        document.getElementById('loader').style.display = 'none';
+        document.getElementById('items-table').style.display = 'table';
+        filterTable(); 
+    } catch (e) {
+        document.getElementById('loader').innerHTML = `<span style="color: #ff3b30">Error loading data: ${e.message}</span>`;
+    }
+}
+
+function filterTable() {
+    const filterValue = document.getElementById('searchInput').value.toLowerCase();
+    const rows = document.querySelectorAll('.item-row');
+    
+    rows.forEach(row => {
+        const searchableText = row.getAttribute('data-search');
+        if (searchableText.includes(filterValue)) {
+            row.style.display = '';
+        } else {
+            row.style.display = 'none';
+        }
+    });
+}
+
+async function receiveItem(poId, lineItemId, currentReceived, maxPending) {
+    const qtyInput = document.getElementById(`qty-${lineItemId}`);
+    const serialInput = document.getElementById(`serial-${lineItemId}`);
+    const btn = document.getElementById(`btn-${lineItemId}`);
+    
+    let qtyToReceive = parseInt(qtyInput.value);
+    let serialNumbers = serialInput.value.trim();
+
+    if (qtyToReceive < 1 || qtyToReceive > maxPending || isNaN(qtyToReceive)) {
+        alert("Invalid quantity! Please enter a number between 1 and " + maxPending);
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "Processing...";
+
+    try {
+        const res = await fetch('/api/receive-item', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ poId, lineItemId, currentReceived, qtyToReceive, serialNumbers })
+        });
+        
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        
+        showToast(`Successfully received ${qtyToReceive} item(s)!`);
+        fetchPending(); 
+    } catch (e) {
+        alert("Failed to receive item: " + e.message);
+        btn.disabled = false;
+        btn.textContent = "Receive";
+    }
+}
+
+function showToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.style.display = 'block';
+    setTimeout(() => toast.style.opacity = '1', 10);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.style.display = 'none', 300);
+    }, 3000);
+}
+
+// Initial load
+fetchPending();
+
+// Auto-refresh every 5 minutes (300,000 milliseconds)
+setInterval(fetchPending, 300000);
+</script>
+</body>
+</html>
