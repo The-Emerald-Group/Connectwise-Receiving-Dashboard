@@ -17,6 +17,8 @@
   .title span { color: var(--accent); }
   
   .controls { display: flex; gap: 15px; align-items: center; }
+  .sync-status { font-size: 0.78rem; color: #5ac8fa; min-width: 90px; text-align: right; visibility: hidden; }
+  .sync-status.active { visibility: visible; }
   .refresh-meta { color: var(--text-dim); font-size: 0.8rem; min-width: 210px; text-align: right; }
   .search-input { background: #111; border: 1px solid #333; color: white; padding: 8px 14px; border-radius: 6px; width: 250px; font-family: inherit; }
   .search-input::placeholder { color: var(--text-dim); }
@@ -65,6 +67,7 @@
   </div>
   
   <div class="controls">
+    <div id="syncStatus" class="sync-status" aria-live="polite">Refreshing...</div>
     <div id="lastRefreshed" class="refresh-meta">Last refreshed: --</div>
     <input type="text" id="searchInput" class="search-input" placeholder="Search PO, Customer, or Product..." onkeyup="filterTable()">
     <button class="btn-batch" id="receiveSelectedBtn" onclick="receiveSelectedItems()" disabled>Receive Selected (0)</button>
@@ -95,6 +98,8 @@ let isFetching = false;
 let pendingRefresh = false;
 let currentItems = [];
 const selectedLineItems = new Set();
+const DASHBOARD_CACHE_KEY = 'cwReceivingDashboardItems';
+const DASHBOARD_REFRESH_AT_KEY = 'cwReceivingDashboardRefreshedAt';
 const refreshFormatter = new Intl.DateTimeFormat(undefined, {
     year: 'numeric',
     month: 'short',
@@ -109,6 +114,34 @@ const refreshFormatter = new Intl.DateTimeFormat(undefined, {
 function updateLastRefreshed(date = new Date()) {
     const el = document.getElementById('lastRefreshed');
     el.textContent = `Last refreshed: ${refreshFormatter.format(date)}`;
+}
+
+function readCachedDashboard() {
+    try {
+        const rawItems = localStorage.getItem(DASHBOARD_CACHE_KEY);
+        const rawRefreshedAt = localStorage.getItem(DASHBOARD_REFRESH_AT_KEY);
+        const items = rawItems ? JSON.parse(rawItems) : null;
+        const refreshedAt = rawRefreshedAt ? new Date(rawRefreshedAt) : null;
+        if (!Array.isArray(items)) return null;
+        return { items, refreshedAt };
+    } catch (_) {
+        return null;
+    }
+}
+
+function writeCachedDashboard(items) {
+    try {
+        localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify(items));
+        localStorage.setItem(DASHBOARD_REFRESH_AT_KEY, new Date().toISOString());
+    } catch (_) {
+        // Ignore storage limits/errors. Dashboard still works without local cache.
+    }
+}
+
+function setSyncStatus(isActive) {
+    const el = document.getElementById('syncStatus');
+    if (!el) return;
+    el.classList.toggle('active', isActive);
 }
 
 function renderTable(items) {
@@ -171,6 +204,7 @@ async function fetchPending(options = {}) {
     }
 
     isFetching = true;
+    setSyncStatus(true);
     if (!silent || currentItems.length === 0) {
         document.getElementById('loader').style.display = 'block';
         document.getElementById('items-table').style.display = 'none';
@@ -182,6 +216,7 @@ async function fetchPending(options = {}) {
         
         if (data.error) throw new Error(data.error);
         renderTable(data.items || []);
+        writeCachedDashboard(data.items || []);
         updateLastRefreshed();
         
         document.getElementById('loader').style.display = 'none';
@@ -191,6 +226,7 @@ async function fetchPending(options = {}) {
         document.getElementById('loader').innerHTML = `<span style="color: #ff3b30">Error loading data: ${e.message}</span>`;
         document.getElementById('loader').style.display = 'block';
     } finally {
+        setSyncStatus(false);
         isFetching = false;
         if (pendingRefresh) {
             pendingRefresh = false;
@@ -387,7 +423,19 @@ function showToast(msg) {
 }
 
 // Initial load
-fetchPending();
+const cachedDashboard = readCachedDashboard();
+if (cachedDashboard && cachedDashboard.items.length > 0) {
+    renderTable(cachedDashboard.items);
+    document.getElementById('loader').style.display = 'none';
+    document.getElementById('items-table').style.display = 'table';
+    filterTable();
+    if (cachedDashboard.refreshedAt && !Number.isNaN(cachedDashboard.refreshedAt.getTime())) {
+        updateLastRefreshed(cachedDashboard.refreshedAt);
+    }
+    fetchPending({ silent: true });
+} else {
+    fetchPending();
+}
 
 // Auto-refresh every 5 minutes (300,000 milliseconds)
 setInterval(fetchPending, 300000);
