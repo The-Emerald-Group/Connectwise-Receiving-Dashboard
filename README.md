@@ -120,6 +120,39 @@ Records receipt of items for a purchase order line item.
 }
 ```
 
+### POST `/api/receive-items`
+Receives multiple purchase order line items in a single request.
+
+**Request**:
+```json
+{
+  "items": [
+    {
+      "poId": 12345,
+      "lineItemId": 67890,
+      "currentReceived": 2,
+      "qtyToReceive": 1,
+      "serialNumbers": "SN004"
+    }
+  ]
+}
+```
+
+**Response**:
+```json
+{
+  "success": true,
+  "processed": 1,
+  "failed": 0,
+  "results": [
+    {
+      "lineItemId": 67890,
+      "success": true
+    }
+  ]
+}
+```
+
 **Response**:
 ```json
 {
@@ -141,7 +174,7 @@ Records receipt of items for a purchase order line item.
 1. Select quantity to receive (defaults to pending amount)
 2. Optionally enter serial numbers (comma-separated)
 3. Click **Receive** button
-4. Dashboard auto-refreshes with updated counts
+4. The row is removed immediately for a smoother flow, then dashboard data is refreshed in the background
 
 ### Auto-Refresh
 - Dashboard automatically refreshes every 5 minutes

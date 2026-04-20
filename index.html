@@ -17,10 +17,14 @@
   .title span { color: var(--accent); }
   
   .controls { display: flex; gap: 15px; align-items: center; }
+  .refresh-meta { color: var(--text-dim); font-size: 0.8rem; min-width: 210px; text-align: right; }
   .search-input { background: #111; border: 1px solid #333; color: white; padding: 8px 14px; border-radius: 6px; width: 250px; font-family: inherit; }
   .search-input::placeholder { color: var(--text-dim); }
   .btn-refresh { background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: 0.2s; font-weight: 600; }
   .btn-refresh:hover { background: #333; }
+  .btn-batch { background: #1f6f45; border: 1px solid #2a8a57; color: #fff; padding: 8px 16px; border-radius: 6px; cursor: pointer; transition: 0.2s; font-weight: 600; }
+  .btn-batch:hover { opacity: 0.9; }
+  .btn-batch:disabled { background: #2a2a2a; border-color: #333; color: #777; cursor: not-allowed; }
 
   table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
   th { text-align: left; padding: 14px 16px; background: #111; color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); }
@@ -32,6 +36,8 @@
   .po-info { font-size: 0.75rem; color: var(--text-dim); font-family: monospace; }
   
   .action-group { display: flex; align-items: center; gap: 12px; }
+  .select-col { width: 44px; text-align: center; }
+  .select-box { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   .input-stack { display: flex; flex-direction: column; gap: 6px; }
   .qty-input { width: 100%; background: #000; border: 1px solid #333; color: white; padding: 8px; border-radius: 4px; text-align: center; font-weight: bold; }
   .serial-input { width: 140px; background: #111; border: 1px dashed #444; color: white; padding: 6px 8px; border-radius: 4px; font-size: 0.75rem; transition: 0.2s; }
@@ -59,7 +65,9 @@
   </div>
   
   <div class="controls">
+    <div id="lastRefreshed" class="refresh-meta">Last refreshed: --</div>
     <input type="text" id="searchInput" class="search-input" placeholder="Search PO, Customer, or Product..." onkeyup="filterTable()">
+    <button class="btn-batch" id="receiveSelectedBtn" onclick="receiveSelectedItems()" disabled>Receive Selected (0)</button>
     <button class="btn-refresh" onclick="fetchPending()">🔄 Refresh Queue</button>
   </div>
 </div>
@@ -69,6 +77,7 @@
 <table id="items-table" style="display: none;">
   <thead>
     <tr>
+      <th class="select-col"><input type="checkbox" id="selectAll" class="select-box" onchange="toggleSelectAll(this.checked)" title="Select all visible"></th>
       <th>Customer & Order Info</th>
       <th>Product Description</th>
       <th>Vendor</th>
@@ -82,56 +91,111 @@
 <div id="toast" class="toast">Item Received!</div>
 
 <script>
-async function fetchPending() {
-    document.getElementById('loader').style.display = 'block';
-    document.getElementById('items-table').style.display = 'none';
+let isFetching = false;
+let pendingRefresh = false;
+let currentItems = [];
+const selectedLineItems = new Set();
+const refreshFormatter = new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    timeZoneName: 'short'
+});
+
+function updateLastRefreshed(date = new Date()) {
+    const el = document.getElementById('lastRefreshed');
+    el.textContent = `Last refreshed: ${refreshFormatter.format(date)}`;
+}
+
+function renderTable(items) {
+    currentItems = items;
+    const tbody = document.getElementById('table-body');
+    tbody.innerHTML = '';
+
+    if (items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:#888; padding: 40px;">No pending items to receive!</td></tr>';
+        updateBatchButton();
+        return;
+    }
+
+    items.forEach(item => {
+        const tr = document.createElement('tr');
+        tr.className = 'item-row';
+        tr.id = `row-${item.lineItemId}`;
+        tr.setAttribute('data-search', `${item.company} ${item.poNumber} ${item.description} ${item.vendor}`.toLowerCase());
+        tr.setAttribute('data-line-id', String(item.lineItemId));
+
+        tr.innerHTML = `
+            <td class="select-col">
+                <input type="checkbox" class="select-box row-select" id="select-${item.lineItemId}" onchange="toggleItemSelection(${item.lineItemId}, this.checked)">
+            </td>
+            <td>
+                <div class="customer-badge">${item.company}</div>
+                <div class="po-info">PO: ${item.poNumber} | SO: ${item.soId || 'N/A'}</div>
+            </td>
+            <td style="font-weight: 500;">${item.description}</td>
+            <td style="color: #aaa; font-size: 0.85rem;">${item.vendor}</td>
+            <td>
+                <strong style="font-size: 1.1rem; color: #ffcc00;">${item.pending}</strong> <span style="font-size:0.75rem; color:#666;">(of ${item.quantity})</span>
+            </td>
+            <td>
+                <div class="action-group">
+                    <div class="input-stack">
+                        <input type="number" id="qty-${item.lineItemId}" class="qty-input" value="${item.pending}" min="1" max="${item.pending}" title="Quantity to Receive">
+                        <input type="text" id="serial-${item.lineItemId}" class="serial-input" placeholder="Serial(s) - Optional" title="Comma-separated serial numbers">
+                    </div>
+                    <button class="btn-receive" id="btn-${item.lineItemId}" onclick="receiveItem(${item.poId}, ${item.lineItemId}, ${item.received}, ${item.pending})">Receive</button>
+                </div>
+            </td>
+        `;
+        tbody.appendChild(tr);
+
+        if (selectedLineItems.has(item.lineItemId)) {
+            const checkbox = document.getElementById(`select-${item.lineItemId}`);
+            if (checkbox) checkbox.checked = true;
+        }
+    });
+
+    updateBatchButton();
+}
+
+async function fetchPending(options = {}) {
+    const { silent = false } = options;
+    if (isFetching) {
+        pendingRefresh = true;
+        return;
+    }
+
+    isFetching = true;
+    if (!silent || currentItems.length === 0) {
+        document.getElementById('loader').style.display = 'block';
+        document.getElementById('items-table').style.display = 'none';
+    }
     
     try {
         const res = await fetch('/api/pending-receipts');
         const data = await res.json();
         
         if (data.error) throw new Error(data.error);
-        
-        const tbody = document.getElementById('table-body');
-        tbody.innerHTML = '';
-        
-        if (data.items.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#888; padding: 40px;">No pending items to receive!</td></tr>';
-        } else {
-            data.items.forEach(item => {
-                const tr = document.createElement('tr');
-                tr.className = 'item-row'; 
-                tr.setAttribute('data-search', `${item.company} ${item.poNumber} ${item.description} ${item.vendor}`.toLowerCase());
-                
-                tr.innerHTML = `
-                    <td>
-                        <div class="customer-badge">${item.company}</div>
-                        <div class="po-info">PO: ${item.poNumber} | SO: ${item.soId || 'N/A'}</div>
-                    </td>
-                    <td style="font-weight: 500;">${item.description}</td>
-                    <td style="color: #aaa; font-size: 0.85rem;">${item.vendor}</td>
-                    <td>
-                        <strong style="font-size: 1.1rem; color: #ffcc00;">${item.pending}</strong> <span style="font-size:0.75rem; color:#666;">(of ${item.quantity})</span>
-                    </td>
-                    <td>
-                        <div class="action-group">
-                            <div class="input-stack">
-                                <input type="number" id="qty-${item.lineItemId}" class="qty-input" value="${item.pending}" min="1" max="${item.pending}" title="Quantity to Receive">
-                                <input type="text" id="serial-${item.lineItemId}" class="serial-input" placeholder="Serial(s) - Optional" title="Comma-separated serial numbers">
-                            </div>
-                            <button class="btn-receive" id="btn-${item.lineItemId}" onclick="receiveItem(${item.poId}, ${item.lineItemId}, ${item.received}, ${item.pending})">Receive</button>
-                        </div>
-                    </td>
-                `;
-                tbody.appendChild(tr);
-            });
-        }
+        renderTable(data.items || []);
+        updateLastRefreshed();
         
         document.getElementById('loader').style.display = 'none';
         document.getElementById('items-table').style.display = 'table';
-        filterTable(); 
+        filterTable();
     } catch (e) {
         document.getElementById('loader').innerHTML = `<span style="color: #ff3b30">Error loading data: ${e.message}</span>`;
+        document.getElementById('loader').style.display = 'block';
+    } finally {
+        isFetching = false;
+        if (pendingRefresh) {
+            pendingRefresh = false;
+            fetchPending({ silent: true });
+        }
     }
 }
 
@@ -147,6 +211,58 @@ function filterTable() {
             row.style.display = 'none';
         }
     });
+    syncSelectAllState();
+}
+
+function toggleItemSelection(lineItemId, isChecked) {
+    if (isChecked) {
+        selectedLineItems.add(lineItemId);
+    } else {
+        selectedLineItems.delete(lineItemId);
+    }
+    updateBatchButton();
+    syncSelectAllState();
+}
+
+function toggleSelectAll(isChecked) {
+    const visibleRows = Array.from(document.querySelectorAll('.item-row')).filter((row) => row.style.display !== 'none');
+    visibleRows.forEach((row) => {
+        const lineId = parseInt(row.getAttribute('data-line-id'));
+        const checkbox = row.querySelector('.row-select');
+        if (!checkbox) return;
+        checkbox.checked = isChecked;
+        if (isChecked) {
+            selectedLineItems.add(lineId);
+        } else {
+            selectedLineItems.delete(lineId);
+        }
+    });
+    updateBatchButton();
+}
+
+function syncSelectAllState() {
+    const selectAll = document.getElementById('selectAll');
+    if (!selectAll) return;
+    const visibleRows = Array.from(document.querySelectorAll('.item-row')).filter((row) => row.style.display !== 'none');
+    if (visibleRows.length === 0) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+    }
+    let selectedVisibleCount = 0;
+    visibleRows.forEach((row) => {
+        const lineId = parseInt(row.getAttribute('data-line-id'));
+        if (selectedLineItems.has(lineId)) selectedVisibleCount += 1;
+    });
+    selectAll.checked = selectedVisibleCount === visibleRows.length;
+    selectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleRows.length;
+}
+
+function updateBatchButton() {
+    const btn = document.getElementById('receiveSelectedBtn');
+    const count = selectedLineItems.size;
+    btn.disabled = count === 0;
+    btn.textContent = `Receive Selected (${count})`;
 }
 
 async function receiveItem(poId, lineItemId, currentReceived, maxPending) {
@@ -175,12 +291,87 @@ async function receiveItem(poId, lineItemId, currentReceived, maxPending) {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         
+        selectedLineItems.delete(lineItemId);
+        const row = document.getElementById(`row-${lineItemId}`);
+        if (row) row.remove();
+        updateBatchButton();
+        syncSelectAllState();
         showToast(`Successfully received ${qtyToReceive} item(s)!`);
-        fetchPending(); 
+        fetchPending({ silent: true });
     } catch (e) {
         alert("Failed to receive item: " + e.message);
         btn.disabled = false;
         btn.textContent = "Receive";
+    }
+}
+
+async function receiveSelectedItems() {
+    const selectedPayloads = [];
+
+    for (const item of currentItems) {
+        if (!selectedLineItems.has(item.lineItemId)) continue;
+        const qtyInput = document.getElementById(`qty-${item.lineItemId}`);
+        const serialInput = document.getElementById(`serial-${item.lineItemId}`);
+        if (!qtyInput) continue;
+
+        const qtyToReceive = parseInt(qtyInput.value);
+        if (qtyToReceive < 1 || qtyToReceive > item.pending || isNaN(qtyToReceive)) {
+            alert(`Invalid quantity for line item ${item.lineItemId}.`);
+            return;
+        }
+
+        selectedPayloads.push({
+            poId: item.poId,
+            lineItemId: item.lineItemId,
+            currentReceived: item.received,
+            qtyToReceive,
+            serialNumbers: serialInput ? serialInput.value.trim() : ""
+        });
+    }
+
+    if (selectedPayloads.length === 0) {
+        alert("No valid selected items to receive.");
+        return;
+    }
+
+    const batchBtn = document.getElementById('receiveSelectedBtn');
+    batchBtn.disabled = true;
+    batchBtn.textContent = "Processing...";
+
+    try {
+        const res = await fetch('/api/receive-items', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: selectedPayloads })
+        });
+
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        const failedIds = new Set((data.results || []).filter((r) => !r.success).map((r) => r.lineItemId));
+        let successCount = 0;
+        selectedPayloads.forEach((payload) => {
+            if (!failedIds.has(payload.lineItemId)) {
+                successCount += 1;
+                selectedLineItems.delete(payload.lineItemId);
+                const row = document.getElementById(`row-${payload.lineItemId}`);
+                if (row) row.remove();
+            }
+        });
+
+        updateBatchButton();
+        syncSelectAllState();
+
+        if (failedIds.size > 0) {
+            showToast(`Received ${successCount} item(s), ${failedIds.size} failed.`);
+        } else {
+            showToast(`Successfully received ${successCount} selected item(s)!`);
+        }
+
+        fetchPending({ silent: true });
+    } catch (e) {
+        alert("Failed to receive selected items: " + e.message);
+        updateBatchButton();
     }
 }
 
